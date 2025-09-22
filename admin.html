@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ImageMatch | Visual Search</title>
+    <title>ImageMatch | Admin Dashboard</title>
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
@@ -186,6 +186,14 @@
             background-color: #0d9669;
         }
 
+        .btn-danger {
+            background-color: #ef4444;
+        }
+
+        .btn-danger:hover {
+            background-color: #dc2626;
+        }
+
         .upload-area {
             border: 2px dashed var(--border);
             border-radius: 12px;
@@ -216,7 +224,7 @@
             color: var(--gray);
         }
 
-        #image-preview {
+        #admin-image-preview {
             display: none;
             max-width: 100%;
             margin-top: 20px;
@@ -224,55 +232,25 @@
             box-shadow: var(--shadow);
         }
 
-        .results-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
-            gap: 25px;
-            margin-top: 30px;
-        }
-
-        .result-card {
-            background: white;
-            border-radius: 12px;
-            overflow: hidden;
-            box-shadow: var(--shadow);
-            transition: var(--transition);
-        }
-
-        .result-card:hover {
-            transform: translateY(-5px);
-            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
-        }
-
-        .result-img {
+        .designs-table {
             width: 100%;
-            height: 180px;
-            object-fit: cover;
+            border-collapse: collapse;
+            margin-top: 20px;
         }
 
-        .result-content {
-            padding: 15px;
+        .designs-table th, .designs-table td {
+            padding: 12px 15px;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
         }
 
-        .result-id {
+        .designs-table th {
+            background-color: var(--gray-light);
             font-weight: 600;
-            color: var(--primary);
-            margin-bottom: 5px;
         }
 
-        .result-similarity {
-            display: inline-block;
-            background: var(--secondary);
-            color: white;
-            padding: 4px 10px;
-            border-radius: 20px;
-            font-size: 0.85rem;
-            margin-bottom: 10px;
-        }
-
-        .result-meta {
-            font-size: 0.9rem;
-            color: var(--gray);
+        .designs-table tr:hover {
+            background-color: var(--gray-light);
         }
 
         .notification {
@@ -317,10 +295,6 @@
                 gap: 15px;
             }
             
-            .results-grid {
-                grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-            }
-            
             .upload-area {
                 padding: 20px;
             }
@@ -335,10 +309,6 @@
             .card {
                 padding: 20px;
             }
-            
-            .results-grid {
-                grid-template-columns: 1fr;
-            }
         }
     </style>
 </head>
@@ -352,8 +322,8 @@
                 </div>
                 <nav>
                     <ul>
-                        <li><a href="index.html" class="active">Search</a></li>
-                        <li><a href="admin.html">Admin Dashboard</a></li>
+                        <li><a href="index.html">Search</a></li>
+                        <li><a href="admin.html" class="active">Admin Dashboard</a></li>
                     </ul>
                 </nav>
             </div>
@@ -361,38 +331,58 @@
     </header>
 
     <main class="container">
-        <h2>Visual Search</h2>
+        <h2>Admin Dashboard</h2>
         
         <div class="card">
             <div class="card-title">
-                <i class="fas fa-search"></i>
-                Upload Query Image
+                <i class="fas fa-upload"></i>
+                Index New Design
             </div>
             
-            <div class="upload-area" id="drop-zone">
-                <i class="fas fa-cloud-upload-alt"></i>
-                <h3>Drag & Drop your image here</h3>
-                <p>or click to browse files</p>
-                <input type="file" id="file-input" style="display: none;" accept="image/*">
-            </div>
-            
-            <img id="image-preview" alt="Image preview">
-            
-            <button class="btn" id="search-btn">
-                <i class="fas fa-search"></i>
-                Search Similar Images
-            </button>
+            <form id="upload-form">
+               
+                
+                <div class="upload-area" id="admin-drop-zone">
+                    <i class="fas fa-cloud-upload-alt"></i>
+                    <h3>Drag & Drop design image here</h3>
+                    <p>or click to browse files</p>
+                    <input type="file" id="admin-file-input" style="display: none;" accept="image/*" required>
+                </div>
+                
+                <img id="admin-image-preview" alt="Image preview">
+                
+                <button type="submit" class="btn btn-secondary">
+                    <i class="fas fa-database"></i>
+                    Index Design
+                </button>
+            </form>
         </div>
         
         <div class="card">
             <div class="card-title">
-                <i class="fas fa-list"></i>
-                Search Results
+                <i class="fas fa-table"></i>
+                Indexed Designs
             </div>
             
-            <div class="results-grid" id="results-container">
-                <!-- Results will be displayed here -->
-            </div>
+            <button class="btn" id="refresh-designs">
+                <i class="fas fa-sync-alt"></i>
+                Refresh Designs
+            </button>
+            
+            <table class="designs-table">
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Image</th>
+                       
+                        <th>Created At</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="designs-table-body">
+                    <!-- Design data will be populated here -->
+                </tbody>
+            </table>
         </div>
     </main>
 
@@ -410,130 +400,197 @@
         // API base URL
         const API_BASE = 'http://localhost:3000';
 
-        // File upload handling for search tab
-        const dropZone = document.getElementById('drop-zone');
-        const fileInput = document.getElementById('file-input');
-        const imagePreview = document.getElementById('image-preview');
+        // File upload handling for admin tab
+        const adminDropZone = document.getElementById('admin-drop-zone');
+        const adminFileInput = document.getElementById('admin-file-input');
+        const adminImagePreview = document.getElementById('admin-image-preview');
         
-        dropZone.addEventListener('click', () => {
-            fileInput.click();
+        adminDropZone.addEventListener('click', () => {
+            adminFileInput.click();
         });
         
-        fileInput.addEventListener('change', function() {
+        adminFileInput.addEventListener('change', function() {
             if (this.files && this.files[0]) {
                 const reader = new FileReader();
                 
                 reader.onload = function(e) {
-                    imagePreview.src = e.target.result;
-                    imagePreview.style.display = 'block';
+                    adminImagePreview.src = e.target.result;
+                    adminImagePreview.style.display = 'block';
                 }
                 
                 reader.readAsDataURL(this.files[0]);
             }
         });
         
-        dropZone.addEventListener('dragover', function(e) {
+        adminDropZone.addEventListener('dragover', function(e) {
             e.preventDefault();
             this.style.borderColor = 'var(--primary)';
             this.style.backgroundColor = 'var(--gray-light)';
         });
         
-        dropZone.addEventListener('dragleave', function() {
+        adminDropZone.addEventListener('dragleave', function() {
             this.style.borderColor = 'var(--border)';
             this.style.backgroundColor = 'transparent';
         });
         
-        dropZone.addEventListener('drop', function(e) {
+        adminDropZone.addEventListener('drop', function(e) {
             e.preventDefault();
             this.style.borderColor = 'var(--border)';
             this.style.backgroundColor = 'transparent';
             
             if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-                fileInput.files = e.dataTransfer.files;
+                adminFileInput.files = e.dataTransfer.files;
                 
                 const reader = new FileReader();
                 
                 reader.onload = function(e) {
-                    imagePreview.src = e.target.result;
-                    imagePreview.style.display = 'block';
+                    adminImagePreview.src = e.target.result;
+                    adminImagePreview.style.display = 'block';
                 }
                 
                 reader.readAsDataURL(e.dataTransfer.files[0]);
             }
         });
 
-        // Search functionality
-        document.getElementById('search-btn').addEventListener('click', async function() {
-            if (!fileInput.files.length) {
+        // Form submission for indexing
+        document.getElementById('upload-form').addEventListener('submit', async function(e) {
+            e.preventDefault(); // Prevent default form submission
+            
+            
+            if (!adminFileInput.files.length) {
                 showNotification('Please upload an image first', true);
                 return;
             }
             
             // Show loading state
-            this.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Searching...';
-            this.disabled = true;
+            const submitBtn = this.querySelector('button[type="submit"]');
+            submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Indexing...';
+            submitBtn.disabled = true;
             
             try {
                 const formData = new FormData();
-                formData.append('image', fileInput.files[0]);
+                formData.append('image', adminFileInput.files[0]);
                 
-                const response = await fetch(`${API_BASE}/upload`, {
+               
+                
+                const response = await fetch(`${API_BASE}/index`, {
                     method: 'POST',
                     body: formData
                 });
                 
                 const data = await response.json();
-                console.log('Search response:', data);
+                
                 if (data.success) {
-                    displayResults(data.results);
-                    showNotification('Search completed successfully!');
+                    // Reset form
+                    this.reset();
+                    adminImagePreview.style.display = 'none';
+                    
+                    // Reload designs table
+                    loadDesigns();
+                    
+                    showNotification('Design indexed successfully!');
                 } else {
-                    showNotification(data.error || 'Search failed', true);
+                    showNotification(data.error || 'Indexing failed', true);
                 }
             } catch (error) {
-                console.log('Search error:', error);
+                console.log('Indexing error:', error);
                 showNotification('Error connecting to server', true);
             } finally {
                 // Reset button
-                this.innerHTML = '<i class="fas fa-search"></i> Search Similar Images';
-                this.disabled = false;
+                submitBtn.innerHTML = '<i class="fas fa-database"></i> Index Design';
+                submitBtn.disabled = false;
+                  loadDesigns();
             }
         });
 
-        // Display search results
-        function displayResults(results) {
-            const resultsContainer = document.getElementById('results-container');
-            resultsContainer.innerHTML = '';
+        // Refresh designs button
+        document.getElementById('refresh-designs').addEventListener('click', loadDesigns);
+
+        // Load designs
+        async function loadDesigns() {
+            const tableBody = document.getElementById('designs-table-body');
+            const refreshBtn = document.getElementById('refresh-designs');
             
-            if (!results || results.length === 0) {
-                resultsContainer.innerHTML = '<p>No similar designs found</p>';
+            refreshBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Loading...';
+            refreshBtn.disabled = true;
+            
+            try {
+                const response = await fetch(`${API_BASE}/designs`);
+                const data = await response.json();
+                
+                if (data.success) {
+                    tableBody.innerHTML = '';
+                    
+                    if (data.designs.length === 0) {
+                        tableBody.innerHTML = '<tr><td colspan="5" style="text-align: center;">No designs indexed yet</td></tr>';
+                    } else {
+                        data.designs.forEach(design => {
+                            const row = document.createElement('tr');
+                            const metadata = typeof design.metadata === 'string' 
+                                ? design.metadata 
+                                : JSON.stringify(design.metadata);
+
+                            row.innerHTML = `
+                                <td>${design.id}</td>
+                                <td>
+                                    <img src="${API_BASE}${design.image_url}" 
+                                         alt="design-${design.id}" 
+                                         style="width:80px; height:80px; object-fit:cover; border-radius:6px;"
+                                         onerror="this.src='https://via.placeholder.com/80?text=No+Img'">
+                                </td>
+                               
+                                <td>${new Date(design.created_at).toLocaleString()}</td>
+                                <td>
+                                    <button class="btn btn-danger delete-btn" data-id="${design.id}" style="padding: 5px 10px; font-size: 0.8rem;">
+                                        <i class="fas fa-trash"></i>
+                                    </button>
+                                </td>
+                            `;
+                            
+                            tableBody.appendChild(row);
+                        });
+                        
+                        // Delete button events
+                        document.querySelectorAll('.delete-btn').forEach(btn => {
+                            btn.addEventListener('click', function() {
+                                const designId = this.getAttribute('data-id');
+                                deleteDesign(designId);
+                            });
+                        });
+                    }
+                }
+            } catch (error) {
+                console.log('Error loading designs:', error);
+                showNotification('Error loading designs', true);
+            } finally {
+                refreshBtn.innerHTML = '<i class="fas fa-sync-alt"></i> Refresh Designs';
+                refreshBtn.disabled = false;
+            }
+        }
+
+        // Delete a design
+        async function deleteDesign(designId) {
+            if (!confirm(`Are you sure you want to delete design ${designId}?`)) {
                 return;
             }
             
-            results.forEach(result => {
-                const similarityPercent = (result.similarity * 100).toFixed(1);
-                const metadata = typeof result.metadata === 'string' 
-                    ? result.metadata 
-                    : JSON.stringify(result.metadata);
+            try {
+                const response = await fetch(`${API_BASE}/designs/${designId}`, {
+                    method: 'DELETE'
+                });
                 
-                const resultCard = document.createElement('div');
-                resultCard.className = 'result-card';
+                const data = await response.json();
                 
-                // Use actual image if available, otherwise use placeholder
-                const imageHtml = result.uploadedImage 
-                    ? `<img src="${API_BASE}${result.uploadedImage}" class="result-img" alt="${result.id}" onerror="this.style.display='none'; this.parentNode.innerHTML += '<div class=\'result-img-placeholder\' style=\'width: 100%; height: 180px; background: #f3f4f6; display: flex; align-items: center; justify-content: center;\'><i class=\'fas fa-shirt\' style=\'font-size: 3rem; color: #9ca3af;\'></i></div>'">`
-                    : `<div class="result-img-placeholder" style="width: 100%; height: 180px; background: #f3f4f6; display: flex; align-items: center; justify-content: center;"><i class="fas fa-shirt" style="font-size: 3rem; color: #9ca3af;"></i></div>`;
-                
-                resultCard.innerHTML = `
-                    ${imageHtml}
-                    <div class="result-content">
-                    
-                        <div class="result-similarity">${similarityPercent}% match</div>
-                    </div>
-                `;
-                
-                resultsContainer.appendChild(resultCard);
-            });
+                if (data.success) {
+                    showNotification('Design deleted successfully');
+                    loadDesigns(); // Reload the table
+                } else {
+                    showNotification(data.error || 'Failed to delete design', true);
+                }
+            } catch (error) {
+                console.log('Delete design error:', error);
+                showNotification('Error connecting to server', true);
+            }
         }
 
         // Show notification
@@ -552,6 +609,11 @@
                 notification.classList.remove('show');
             }, 3000);
         }
+
+        // Load designs on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            loadDesigns();
+        });
     </script>
 </body>
 </html>

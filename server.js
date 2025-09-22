@@ -55,7 +55,7 @@ async function initializeDatabase() {
     // Create designs table if it doesn't exist
     await connection.execute(`
       CREATE TABLE IF NOT EXISTS designs (
-        id VARCHAR(255) PRIMARY KEY,
+        id INT AUTO_INCREMENT PRIMARY KEY,
         image_url VARCHAR(512),
         metadata JSON,
         embedding JSON,
@@ -426,10 +426,10 @@ app.post('/index', upload.single('image'), async (req, res) => {
 
   try {
     if (!req.file) return res.status(400).json({ error: 'No image file provided' });
-    if (!req.body.id) return res.status(400).json({ error: 'Design ID is required' });
+    // if (!req.body.id) return res.status(400).json({ error: 'Design ID is required' });
 
-    const [existing] = await connection.execute('SELECT id FROM designs WHERE id = ?', [req.body.id]);
-    if (existing.length > 0) return res.status(400).json({ error: 'Design ID already exists' });
+    // const [existing] = await connection.execute('SELECT id FROM designs WHERE id = ?', [req.body.id]);
+    // if (existing.length > 0) return res.status(400).json({ error: 'Design ID already exists' });
 
     // ✅ save uploaded file into public/uploads
     const uploadsDir = path.join(__dirname, 'public', 'uploads');
@@ -452,14 +452,13 @@ app.post('/index', upload.single('image'), async (req, res) => {
     }
 
     await connection.execute(
-      'INSERT INTO designs (id, image_url, metadata, embedding) VALUES (?, ?, ?, ?)',
-      [req.body.id, imageUrl, JSON.stringify(metadata), JSON.stringify(embedding)]
+      'INSERT INTO designs ( image_url, metadata, embedding) VALUES ( ?, ?, ?)',
+      [ imageUrl, JSON.stringify(metadata), JSON.stringify(embedding)]
     );
 
     res.json({
       success: true,
       message: 'Design indexed successfully',
-      id: req.body.id,
       imageUrl: imageUrl
     });
   } catch (error) {
