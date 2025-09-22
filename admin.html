@@ -517,6 +517,7 @@
             try {
                 const response = await fetch(`${API_BASE}/designs`);
                 const data = await response.json();
+
                 
                 if (data.success) {
                     tableBody.innerHTML = '';

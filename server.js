@@ -4,10 +4,9 @@ const cors = require('cors');
 const tf = require('@tensorflow/tfjs-node');
 const mysql = require('mysql2/promise');
 const sharp = require('sharp');
-const { createCanvas, loadImage } = require('canvas');
 const path = require('path');
 const fs = require('fs');
-
+const crypto = require('crypto');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -22,7 +21,7 @@ const storage = multer.memoryStorage();
 const upload = multer({ 
   storage: storage,
   limits: {
-    fileSize: 5 * 1024 * 1024, // 5MB limit
+    fileSize: 10 * 1024 * 1024, // 10MB limit
   },
   fileFilter: (req, file, cb) => {
     if (file.mimetype.startsWith('image/')) {
@@ -41,11 +40,43 @@ const dbConfig = {
   database: process.env.DB_NAME || 'ImageSearch',
   waitForConnections: true,
   connectionLimit: 10,
-  queueLimit: 0
+  queueLimit: 0,
+  typeCast: function (field, next) {
+    if (field.type === 'JSON') {
+      try {
+        return JSON.parse(field.string());
+      } catch (e) {
+        return field.string();
+      }
+    }
+    return next();
+  }
 };
 
 // Create MySQL connection pool
 const pool = mysql.createPool(dbConfig);
+
+// Load MobileNet model
+let model;
+async function loadModel() {
+  try {
+    console.log('Loading MobileNet model...');
+    model = await tf.loadLayersModel('https://storage.googleapis.com/tfjs-models/tfjs/mobilenet_v1_0.25_224/model.json');
+    console.log('MobileNet model loaded successfully');
+  } catch (error) {
+    console.error('Error loading model:', error);
+    // Fallback to local model if online loading fails
+    try {
+      console.log('Trying local model...');
+      // You can download the model and serve it locally
+      model = await tf.loadLayersModel('file://./model/model.json');
+      console.log('Local model loaded successfully');
+    } catch (localError) {
+      console.error('Error loading local model:', localError);
+      throw new Error('Could not load any model');
+    }
+  }
+}
 
 // Initialize database tables
 async function initializeDatabase() {
@@ -59,7 +90,13 @@ async function initializeDatabase() {
         image_url VARCHAR(512),
         metadata JSON,
         embedding JSON,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        phash VARCHAR(64),
+        product_type VARCHAR(100),
+        brand VARCHAR(100),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX phash_idx (phash),
+        INDEX product_type_idx (product_type),
+        INDEX brand_idx (brand)
       )
     `);
     
@@ -71,265 +108,96 @@ async function initializeDatabase() {
   }
 }
 
-// Advanced feature extraction without MobileNet
-async function extractAdvancedFeatures(imageBuffer) {
+// Enhanced image preprocessing for fashion items
+async function preprocessImage(imageBuffer) {
   try {
-    // Use Sharp for advanced preprocessing
-    const processedBuffer = await sharp(imageBuffer)
-      .resize(256, 256, {
-        fit: 'cover',
-        position: 'center'
+    // Remove background and focus on the product
+    const processed = await sharp(imageBuffer)
+      .resize(224, 224, {
+        fit: 'contain',
+        background: { r: 255, g: 255, b: 255, alpha: 1 } // White background
       })
       .normalize()
       .sharpen()
-      .removeAlpha()
       .jpeg()
       .toBuffer();
 
-    // Extract multiple feature types
-    const [colorFeatures, textureFeatures, shapeFeatures, histogramFeatures] = await Promise.all([
-      extractColorMoments(processedBuffer),
-      extractLBPFeatures(processedBuffer),
-      extractHOGFeatures(processedBuffer),
-      extractColorHistogram(processedBuffer)
-    ]);
-
-    // Combine all features
-    const combinedFeatures = [
-      ...colorFeatures,
-      ...textureFeatures, 
-      ...shapeFeatures,
-      ...histogramFeatures
-    ];
-
-    console.log('Feature dimensions - Color:', colorFeatures.length, 
-                'Texture:', textureFeatures.length, 
-                'Shape:', shapeFeatures.length,
-                'Histogram:', histogramFeatures.length,
-                'Total:', combinedFeatures.length);
-
-    return combinedFeatures;
+    return processed;
   } catch (error) {
-    console.error('Error extracting advanced features:', error);
+    console.error('Error preprocessing image:', error);
     throw error;
   }
 }
 
-// Color Moments (mean, standard deviation, skewness for each channel)
-async function extractColorMoments(imageBuffer) {
+// Extract features using MobileNet
+async function extractDeepFeatures(imageBuffer) {
   try {
-    const image = await sharp(imageBuffer).raw().toBuffer({ resolveWithObject: true });
-    const { data, info } = image;
-    const { width, height, channels } = info;
-
-    const moments = [];
+    const processedBuffer = await preprocessImage(imageBuffer);
     
-    for (let c = 0; c < channels; c++) {
-      let sum = 0;
-      let sumSq = 0;
-      let sumCubed = 0;
-      let count = 0;
-
-      for (let i = c; i < data.length; i += channels) {
-        const pixel = data[i] / 255;
-        sum += pixel;
-        sumSq += pixel * pixel;
-        sumCubed += pixel * pixel * pixel;
-        count++;
-      }
-
-      const mean = sum / count;
-      const variance = (sumSq / count) - (mean * mean);
-      const stdDev = Math.sqrt(Math.max(0, variance));
-      const skewness = (sumCubed / count) - (3 * mean * variance) - (mean * mean * mean);
-
-      moments.push(mean, stdDev, skewness || 0);
+    // Decode image to tensor
+    const imageTensor = tf.node.decodeImage(processedBuffer, 3);
+    
+    // Ensure the image has 3 channels (RGB)
+    let finalTensor = imageTensor;
+    if (imageTensor.shape[2] === 4) {
+      finalTensor = imageTensor.slice([0, 0, 0], [224, 224, 3]);
     }
-
-    return moments;
+    
+    // Normalize to [-1, 1]
+    const normalized = finalTensor.toFloat().div(tf.scalar(127.5)).sub(tf.scalar(1));
+    
+    // Add batch dimension
+    const batched = normalized.expandDims(0);
+    
+    // Get features from the model
+    const predictions = model.predict(batched);
+    const features = predictions.dataSync();
+    
+    // Clean up tensors
+    tf.dispose([imageTensor, finalTensor, normalized, batched, predictions]);
+    
+    return Array.from(features);
   } catch (error) {
-    console.error('Error extracting color moments:', error);
-    return new Array(9).fill(0);
+    console.error('Error extracting deep features:', error);
+    throw error;
   }
 }
 
-// Local Binary Pattern (LBP) for texture features
-async function extractLBPFeatures(imageBuffer) {
+// Perceptual Hash for exact duplicates
+async function generatePerceptualHash(imageBuffer) {
   try {
-    const { data, info } = await sharp(imageBuffer)
-      .greyscale()
+    const resized = await sharp(imageBuffer)
+      .resize(32, 32)
+      .grayscale()
       .raw()
       .toBuffer({ resolveWithObject: true });
 
-    const { width, height } = info;
-    const lbpHistogram = new Array(256).fill(0);
-
-    for (let y = 1; y < height - 1; y++) {
-      for (let x = 1; x < width - 1; x++) {
-        const center = data[y * width + x];
-        let pattern = 0;
-
-        // 3x3 neighborhood
-        const neighbors = [
-          data[(y-1) * width + (x-1)], data[(y-1) * width + x], data[(y-1) * width + (x+1)],
-          data[y * width + (x-1)], data[y * width + (x+1)],
-          data[(y+1) * width + (x-1)], data[(y+1) * width + x], data[(y+1) * width + (x+1)]
-        ];
-
-        neighbors.forEach((neighbor, index) => {
-          if (neighbor >= center) {
-            pattern |= (1 << index);
-          }
-        });
-
-        lbpHistogram[pattern]++;
-      }
+    const { data } = resized;
+    let total = 0;
+    
+    for (let i = 0; i < data.length; i++) {
+      total += data[i];
+    }
+    
+    const average = total / data.length;
+    let hash = '';
+    
+    for (let i = 0; i < data.length; i++) {
+      hash += data[i] > average ? '1' : '0';
     }
 
-    // Normalize histogram
-    const total = lbpHistogram.reduce((sum, val) => sum + val, 0);
-    return lbpHistogram.map(val => val / total);
+    return crypto.createHash('md5').update(hash).digest('hex');
   } catch (error) {
-    console.error('Error extracting LBP features:', error);
-    return new Array(256).fill(0);
+    console.error('Error generating perceptual hash:', error);
+    return null;
   }
 }
 
-// Histogram of Oriented Gradients (HOG) for shape features
-async function extractHOGFeatures(imageBuffer) {
-  try {
-    const { data, info } = await sharp(imageBuffer)
-      .greyscale()
-      .raw()
-      .toBuffer({ resolveWithObject: true });
-
-    const { width, height } = info;
-    const hogFeatures = [];
-    const cellSize = 8;
-    const numBins = 9;
-
-    for (let y = 0; y < height - cellSize; y += cellSize) {
-      for (let x = 0; x < width - cellSize; x += cellSize) {
-        const cellHistogram = new Array(numBins).fill(0);
-
-        for (let cy = 0; cy < cellSize; cy++) {
-          for (let cx = 0; cx < cellSize; cx++) {
-            const px = x + cx;
-            const py = y + cy;
-
-            if (px < width - 1 && py < height - 1) {
-              const gx = data[py * width + (px + 1)] - data[py * width + (px - 1)];
-              const gy = data[(py + 1) * width + px] - data[(py - 1) * width + px];
-              
-              const magnitude = Math.sqrt(gx * gx + gy * gy);
-              let angle = Math.atan2(gy, gx) * (180 / Math.PI);
-              if (angle < 0) angle += 180;
-
-              const bin = Math.floor(angle / (180 / numBins)) % numBins;
-              cellHistogram[bin] += magnitude;
-            }
-          }
-        }
-
-        // L2 normalization for the cell
-        const norm = Math.sqrt(cellHistogram.reduce((sum, val) => sum + val * val, 0));
-        hogFeatures.push(...cellHistogram.map(val => norm > 0 ? val / norm : 0));
-      }
-    }
-
-    return hogFeatures.slice(0, 100); // Limit to first 100 features
-  } catch (error) {
-    console.error('Error extracting HOG features:', error);
-    return new Array(100).fill(0);
-  }
-}
-
-// Enhanced color histogram
-async function extractColorHistogram(imageBuffer) {
-  try {
-    const { data, info } = await sharp(imageBuffer)
-      .raw()
-      .toBuffer({ resolveWithObject: true });
-
-    const { width, height, channels } = info;
-    const histograms = [[], [], []]; // RGB histograms
-    const binSize = 32;
-
-    // Initialize histograms
-    for (let c = 0; c < channels; c++) {
-      for (let i = 0; i < 8; i++) {
-        histograms[c][i] = 0;
-      }
-    }
-
-    // Build histograms
-    for (let i = 0; i < data.length; i += channels) {
-      for (let c = 0; c < channels; c++) {
-        const bin = Math.floor(data[i + c] / binSize);
-        if (bin >= 0 && bin < 8) {
-          histograms[c][bin]++;
-        }
-      }
-    }
-
-    // Normalize and flatten
-    const totalPixels = width * height;
-    const flatHistogram = histograms.flat().map(val => val / totalPixels);
-
-    // Add statistical moments
-    const mean = flatHistogram.reduce((sum, val) => sum + val, 0) / flatHistogram.length;
-    const std = Math.sqrt(flatHistogram.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / flatHistogram.length);
-
-    return [...flatHistogram, mean, std];
-  } catch (error) {
-    console.error('Error extracting color histogram:', error);
-    return new Array(26).fill(0);
-  }
-}
-
-// Calculate similarity with feature weighting
-function calculateFeatureSimilarity(vecA, vecB) {
-  if (vecA.length !== vecB.length) return 0;
-
-  // Feature type boundaries (adjust based on your feature extraction)
-  const colorEnd = 9;        // Color moments: 9 features
-  const textureEnd = 265;    // LBP: 256 features  
-  const shapeEnd = 365;      // HOG: 100 features
-  const histogramEnd = 391;  // Color histogram: 26 features
-
-  const colorA = vecA.slice(0, colorEnd);
-  const colorB = vecB.slice(0, colorEnd);
-  const textureA = vecA.slice(colorEnd, textureEnd);
-  const textureB = vecB.slice(colorEnd, textureEnd);
-  const shapeA = vecA.slice(textureEnd, shapeEnd);
-  const shapeB = vecB.slice(textureEnd, shapeEnd);
-  const histogramA = vecA.slice(shapeEnd, histogramEnd);
-  const histogramB = vecB.slice(shapeEnd, histogramEnd);
-
-  // Calculate individual similarities
-  const colorSim = cosineSimilarity(colorA, colorB);
-  const textureSim = cosineSimilarity(textureA, textureB);
-  const shapeSim = cosineSimilarity(shapeA, shapeB);
-  const histogramSim = cosineSimilarity(histogramA, histogramB);
-
-  console.log('Component similarities - Color:', colorSim.toFixed(3), 
-              'Texture:', textureSim.toFixed(3), 
-              'Shape:', shapeSim.toFixed(3),
-              'Histogram:', histogramSim.toFixed(3));
-
-  // Weighted combination (adjust weights based on importance)
-  const finalSimilarity = (
-    colorSim * 0.25 + 
-    textureSim * 0.30 + 
-    shapeSim * 0.30 + 
-    histogramSim * 0.15
-  );
-
-  return Math.max(0, Math.min(1, finalSimilarity));
-}
-
-// Cosine similarity function
-function cosineSimilarity(vecA, vecB) {
+// Enhanced similarity calculation for fashion items
+function calculateSimilarity(vecA, vecB) {
+  if (!vecA || !vecB || vecA.length !== vecB.length) return 0;
+  
+  // Use cosine similarity for deep learning features
   let dotProduct = 0;
   let normA = 0;
   let normB = 0;
@@ -340,51 +208,80 @@ function cosineSimilarity(vecA, vecB) {
     normB += vecB[i] * vecB[i];
   }
   
-  if (normA === 0 || normB === 0) {
-    return 0;
-  }
+  if (normA === 0 || normB === 0) return 0;
   
   const similarity = dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
-  return isNaN(similarity) ? 0 : similarity;
+  return Math.max(0, similarity);
 }
 
-// Search for similar images
-async function searchSimilarImages(queryEmbedding, topK = 5) {
+// Search with metadata filtering
+async function searchSimilarImages(queryEmbedding, queryPhash, filters = {}, topK = 10) {
   const connection = await pool.getConnection();
   
   try {
-    const [rows] = await connection.execute('SELECT id, image_url, metadata, embedding FROM designs');
+    let query = 'SELECT id, image_url, metadata, embedding, phash, product_type, brand FROM designs';
+    const params = [];
+    const conditions = [];
+    
+    // Add filters if provided
+    if (filters.product_type) {
+      conditions.push('product_type = ?');
+      params.push(filters.product_type);
+    }
+    if (filters.brand) {
+      conditions.push('brand = ?');
+      params.push(filters.brand);
+    }
+    
+    if (conditions.length > 0) {
+      query += ' WHERE ' + conditions.join(' AND ');
+    }
+    
+    const [rows] = await connection.execute(query, params);
     const results = [];
     
     for (const item of rows) {
       try {
-        const embedding = item.embedding;
-        
-        if (!embedding || !Array.isArray(embedding) || queryEmbedding.length !== embedding.length) {
+        let embedding;
+        try {
+          embedding = typeof item.embedding === 'string' ? JSON.parse(item.embedding) : item.embedding;
+        } catch (e) {
+          console.error('Error parsing embedding for item:', item.id, e);
           continue;
         }
         
-        const similarity = calculateFeatureSimilarity(queryEmbedding, embedding);
-        console.log(`Final similarity with ${item.id}:`, similarity.toFixed(3));
-        var similar = parseFloat(similarity.toFixed(3));
+        if (!embedding || !Array.isArray(embedding)) {
+          continue;
+        }
         
-        // ✅ only include if similarity ≥ 0.9
-        if (similar >= 0.7) {
+        // Check for exact duplicates first
+        if (queryPhash && item.phash) {
+          const hammingDistance = calculateHammingDistance(queryPhash, item.phash);
+          if (hammingDistance <= 3) { // Very close match
+            results.push({
+              id: item.id,
+              image_url: item.image_url,
+              metadata: item.metadata,
+              similarity: 1.0 - (hammingDistance * 0.1),
+              isExactMatch: hammingDistance === 0
+            });
+            continue;
+          }
+        }
+        
+        // Calculate deep learning similarity
+        const similarity = calculateSimilarity(queryEmbedding, embedding);
+        
+        if (similarity >= 0.7) { // Adjust threshold as needed
           results.push({
-            uploadedImage:item.image_url,
             id: item.id,
+            image_url: item.image_url,
             metadata: item.metadata,
-            similarity: similar
+            similarity: parseFloat(similarity.toFixed(3)),
+            isExactMatch: false
           });
         }
-
-        // results.push({
-        //     uploadedImage:item.image_url,
-        //     id: item.id,
-        //     metadata: item.metadata,
-        //     similarity: similar
-        //   });
-
+        
       } catch (error) {
         console.error('Error processing design:', item.id, error);
       }
@@ -398,6 +295,15 @@ async function searchSimilarImages(queryEmbedding, topK = 5) {
   }
 }
 
+function calculateHammingDistance(hash1, hash2) {
+  if (!hash1 || !hash2 || hash1.length !== hash2.length) return Infinity;
+  
+  let distance = 0;
+  for (let i = 0; i < hash1.length; i++) {
+    if (hash1[i] !== hash2[i]) distance++;
+  }
+  return distance;
+}
 
 // Routes
 app.post('/upload', upload.single('image'), async (req, res) => {
@@ -406,14 +312,23 @@ app.post('/upload', upload.single('image'), async (req, res) => {
       return res.status(400).json({ error: 'No image file provided' });
     }
 
-    // ✅ save uploaded file into public/uploads
-    
-    const embedding = await extractAdvancedFeatures(req.file.buffer);
-    const results = await searchSimilarImages(embedding);
+    const [embedding, phash] = await Promise.all([
+      extractDeepFeatures(req.file.buffer),
+      generatePerceptualHash(req.file.buffer)
+    ]);
+
+    // Extract filters from query parameters
+    const filters = {
+      product_type: req.query.product_type,
+      brand: req.query.brand
+    };
+
+    const results = await searchSimilarImages(embedding, phash, filters, 12);
 
     res.json({
       success: true,
-      results: results          // ✅ already filtered by ≥ 90%
+      results: results,
+      totalMatches: results.length
     });
   } catch (error) {
     console.error('Error processing upload:', error);
@@ -426,34 +341,38 @@ app.post('/index', upload.single('image'), async (req, res) => {
 
   try {
     if (!req.file) return res.status(400).json({ error: 'No image file provided' });
-    // if (!req.body.id) return res.status(400).json({ error: 'Design ID is required' });
 
-    // const [existing] = await connection.execute('SELECT id FROM designs WHERE id = ?', [req.body.id]);
-    // if (existing.length > 0) return res.status(400).json({ error: 'Design ID already exists' });
+    const [embedding, phash] = await Promise.all([
+      extractDeepFeatures(req.file.buffer),
+      generatePerceptualHash(req.file.buffer)
+    ]);
 
-    // ✅ save uploaded file into public/uploads
+    // Save file
     const uploadsDir = path.join(__dirname, 'public', 'uploads');
     if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
-    const filename = Date.now() + '-' + req.file.originalname;
+    
+    const filename = `${Date.now()}-${crypto.randomBytes(8).toString('hex')}${path.extname(req.file.originalname)}`;
     const filePath = path.join(uploadsDir, filename);
     fs.writeFileSync(filePath, req.file.buffer);
 
     const imageUrl = `/uploads/${filename}`;
-
-    const embedding = await extractAdvancedFeatures(req.file.buffer);
     let metadata = {};
+    let product_type = '';
+    let brand = '';
 
     if (req.body.metadata) {
       try {
         metadata = JSON.parse(req.body.metadata);
+        product_type = metadata.product_type || '';
+        brand = metadata.brand || '';
       } catch (e) {
         console.error('Error parsing metadata:', e);
       }
     }
 
     await connection.execute(
-      'INSERT INTO designs ( image_url, metadata, embedding) VALUES ( ?, ?, ?)',
-      [ imageUrl, JSON.stringify(metadata), JSON.stringify(embedding)]
+      'INSERT INTO designs (image_url, metadata, embedding, phash, product_type, brand) VALUES (?, ?, ?, ?, ?, ?)',
+      [imageUrl, JSON.stringify(metadata), JSON.stringify(embedding), phash, product_type, brand]
     );
 
     res.json({
@@ -469,15 +388,30 @@ app.post('/index', upload.single('image'), async (req, res) => {
   }
 });
 
-
-// Get all indexed designs
+// Get all indexed designs with pagination - FIXED
 app.get('/designs', async (req, res) => {
   const connection = await pool.getConnection();
   try {
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.max(1, Math.min(100, parseInt(req.query.limit) || 20));
+    const offset = (page - 1) * limit;
+
+    // Use template literals for LIMIT and OFFSET to avoid parameter issues
     const [rows] = await connection.execute(
-      'SELECT id, image_url, metadata, created_at FROM designs ORDER BY created_at DESC'
+      `SELECT id, image_url, metadata, product_type, brand, created_at FROM designs ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}`
     );
-    res.json({ success: true, count: rows.length, designs: rows });
+
+    const [countRows] = await connection.execute('SELECT COUNT(*) as total FROM designs');
+    const total = countRows[0].total;
+
+    res.json({ 
+      success: true, 
+      count: rows.length, 
+      total: total,
+      page: page,
+      pages: Math.ceil(total / limit),
+      designs: rows 
+    });
   } catch (error) {
     console.error('Error retrieving designs:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -485,7 +419,6 @@ app.get('/designs', async (req, res) => {
     connection.release();
   }
 });
-
 
 // Delete a design
 app.delete('/designs/:id', async (req, res) => {
@@ -513,15 +446,31 @@ app.delete('/designs/:id', async (req, res) => {
   }
 });
 
+// Health check endpoint
+app.get('/health', async (req, res) => {
+  try {
+    const connection = await pool.getConnection();
+    connection.release();
+    
+    res.json({ 
+      status: 'healthy', 
+      model: 'MobileNet v1', 
+      timestamp: new Date().toISOString() 
+    });
+  } catch (error) {
+    res.status(500).json({ status: 'unhealthy', error: error.message });
+  }
+});
 
 // Initialize and start server
 async function startServer() {
   try {
+    await loadModel();
     await initializeDatabase();
     
     app.listen(PORT, () => {
       console.log(`Server running on http://localhost:${PORT}`);
-      console.log('Using advanced feature extraction (no MobileNet)');
+      console.log('Using MobileNet deep learning model for image similarity');
     });
   } catch (error) {
     console.error('Failed to start server:', error);

@@ -520,8 +520,8 @@
                 resultCard.className = 'result-card';
                 
                 // Use actual image if available, otherwise use placeholder
-                const imageHtml = result.uploadedImage 
-                    ? `<img src="${API_BASE}${result.uploadedImage}" class="result-img" alt="${result.id}" onerror="this.style.display='none'; this.parentNode.innerHTML += '<div class=\'result-img-placeholder\' style=\'width: 100%; height: 180px; background: #f3f4f6; display: flex; align-items: center; justify-content: center;\'><i class=\'fas fa-shirt\' style=\'font-size: 3rem; color: #9ca3af;\'></i></div>'">`
+                const imageHtml = result.image_url 
+                    ? `<img src="${API_BASE}${result.image_url}" class="result-img" alt="${result.id}" onerror="this.style.display='none'; this.parentNode.innerHTML += '<div class=\'result-img-placeholder\' style=\'width: 100%; height: 180px; background: #f3f4f6; display: flex; align-items: center; justify-content: center;\'><i class=\'fas fa-shirt\' style=\'font-size: 3rem; color: #9ca3af;\'></i></div>'">`
                     : `<div class="result-img-placeholder" style="width: 100%; height: 180px; background: #f3f4f6; display: flex; align-items: center; justify-content: center;"><i class="fas fa-shirt" style="font-size: 3rem; color: #9ca3af;"></i></div>`;
                 
                 resultCard.innerHTML = `
