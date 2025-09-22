@@ -21,7 +21,7 @@ const storage = multer.memoryStorage();
 const upload = multer({ 
   storage: storage,
   limits: {
-    fileSize: 10 * 1024 * 1024, // 10MB limit
+    fileSize: 10 * 1024 * 1024,
   },
   fileFilter: (req, file, cb) => {
     if (file.mimetype.startsWith('image/')) {
@@ -40,50 +40,39 @@ const dbConfig = {
   database: process.env.DB_NAME || 'ImageSearch',
   waitForConnections: true,
   connectionLimit: 10,
-  queueLimit: 0,
-  typeCast: function (field, next) {
-    if (field.type === 'JSON') {
-      try {
-        return JSON.parse(field.string());
-      } catch (e) {
-        return field.string();
-      }
-    }
-    return next();
-  }
+  queueLimit: 0
 };
 
-// Create MySQL connection pool
 const pool = mysql.createPool(dbConfig);
 
-// Load MobileNet model
+// Use Universal Sentence Encoder's image module or a more appropriate model
 let model;
 async function loadModel() {
   try {
-    console.log('Loading MobileNet model...');
-    model = await tf.loadLayersModel('https://storage.googleapis.com/tfjs-models/tfjs/mobilenet_v1_0.25_224/model.json');
-    console.log('MobileNet model loaded successfully');
+    console.log('Loading image feature extraction model...');
+    
+    // Try to load a more suitable model for feature extraction
+    // MobileNet is good but we need to use the right layer for features
+    model = await tf.loadGraphModel('https://tfhub.dev/google/tfjs-model/imagenet/mobilenet_v2_100_224/feature_vector/3/default/1');
+    console.log('MobileNet V2 feature extractor loaded successfully');
   } catch (error) {
-    console.error('Error loading model:', error);
-    // Fallback to local model if online loading fails
+    console.error('Error loading feature extraction model:', error);
+    
+    // Fallback to regular MobileNet
     try {
-      console.log('Trying local model...');
-      // You can download the model and serve it locally
-      model = await tf.loadLayersModel('file://./model/model.json');
-      console.log('Local model loaded successfully');
-    } catch (localError) {
-      console.error('Error loading local model:', localError);
-      throw new Error('Could not load any model');
+      model = await tf.loadLayersModel('https://storage.googleapis.com/tfjs-models/tfjs/mobilenet_v1_0.25_224/model.json');
+      console.log('Standard MobileNet loaded as fallback');
+    } catch (fallbackError) {
+      console.error('Failed to load any model:', fallbackError);
+      throw new Error('Could not load image model');
     }
   }
 }
 
-// Initialize database tables
+// Initialize database
 async function initializeDatabase() {
   try {
     const connection = await pool.getConnection();
-    
-    // Create designs table if it doesn't exist
     await connection.execute(`
       CREATE TABLE IF NOT EXISTS designs (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -91,205 +80,278 @@ async function initializeDatabase() {
         metadata JSON,
         embedding JSON,
         phash VARCHAR(64),
-        product_type VARCHAR(100),
-        brand VARCHAR(100),
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        INDEX phash_idx (phash),
-        INDEX product_type_idx (product_type),
-        INDEX brand_idx (brand)
+        INDEX phash_idx (phash)
       )
     `);
-    
     connection.release();
-    console.log('Database initialized successfully');
+    console.log('Database initialized');
   } catch (error) {
-    console.error('Error initializing database:', error);
+    console.error('Database initialization error:', error);
     throw error;
   }
 }
 
-// Enhanced image preprocessing for fashion items
+// Enhanced preprocessing for better feature extraction
 async function preprocessImage(imageBuffer) {
   try {
-    // Remove background and focus on the product
-    const processed = await sharp(imageBuffer)
+    const metadata = await sharp(imageBuffer).metadata();
+    
+    // Auto-orient and strip EXIF data
+    let processed = sharp(imageBuffer)
+      .rotate() // Auto-rotate based on EXIF
       .resize(224, 224, {
-        fit: 'contain',
-        background: { r: 255, g: 255, b: 255, alpha: 1 } // White background
+        fit: 'cover',
+        position: 'center',
+        withoutEnlargement: true
       })
       .normalize()
-      .sharpen()
-      .jpeg()
-      .toBuffer();
+      .linear(1.1, 0) // Slight contrast enhancement
+      .jpeg({ quality: 90 });
 
-    return processed;
+    return await processed.toBuffer();
   } catch (error) {
-    console.error('Error preprocessing image:', error);
+    console.error('Preprocessing error:', error);
     throw error;
   }
 }
 
-// Extract features using MobileNet
+// Extract features with better normalization
 async function extractDeepFeatures(imageBuffer) {
   try {
     const processedBuffer = await preprocessImage(imageBuffer);
+    const tensor = tf.node.decodeImage(processedBuffer, 3);
     
-    // Decode image to tensor
-    const imageTensor = tf.node.decodeImage(processedBuffer, 3);
-    
-    // Ensure the image has 3 channels (RGB)
-    let finalTensor = imageTensor;
-    if (imageTensor.shape[2] === 4) {
-      finalTensor = imageTensor.slice([0, 0, 0], [224, 224, 3]);
-    }
-    
-    // Normalize to [-1, 1]
-    const normalized = finalTensor.toFloat().div(tf.scalar(127.5)).sub(tf.scalar(1));
-    
-    // Add batch dimension
+    // Normalize to [0, 1] instead of [-1, 1] for better similarity
+    const normalized = tensor.toFloat().div(tf.scalar(255));
     const batched = normalized.expandDims(0);
     
-    // Get features from the model
-    const predictions = model.predict(batched);
-    const features = predictions.dataSync();
+    let features;
+    if (model instanceof tf.GraphModel) {
+      // For feature vector models
+      features = model.predict(batched);
+    } else {
+      // For classification models, use intermediate layers
+      const layer = model.getLayer('conv_pw_13_relu'); // Use a deeper layer
+      const intermediateModel = tf.model({
+        inputs: model.inputs,
+        outputs: layer.output
+      });
+      features = intermediateModel.predict(batched);
+    }
     
-    // Clean up tensors
-    tf.dispose([imageTensor, finalTensor, normalized, batched, predictions]);
+    const featureArray = Array.from(features.dataSync());
     
-    return Array.from(features);
+    // Clean up
+    tf.dispose([tensor, normalized, batched, features]);
+    
+    console.log(`Extracted ${featureArray.length} features`);
+    return featureArray;
   } catch (error) {
-    console.error('Error extracting deep features:', error);
-    throw error;
+    console.error('Feature extraction error:', error);
+    
+    // Fallback to traditional features if deep learning fails
+    return await extractTraditionalFeatures(imageBuffer);
   }
 }
 
-// Perceptual Hash for exact duplicates
+// Traditional feature extraction as fallback
+async function extractTraditionalFeatures(imageBuffer) {
+  try {
+    const [colorFeatures, textureFeatures, shapeFeatures] = await Promise.all([
+      extractColorFeatures(imageBuffer),
+      extractTextureFeatures(imageBuffer),
+      extractShapeFeatures(imageBuffer)
+    ]);
+    
+    return [...colorFeatures, ...textureFeatures, ...shapeFeatures];
+  } catch (error) {
+    console.error('Traditional feature extraction failed:', error);
+    return new Array(512).fill(0); // Return empty features
+  }
+}
+
+async function extractColorFeatures(imageBuffer) {
+  const { data, info } = await sharp(imageBuffer)
+    .resize(64, 64)
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  
+  const histograms = [[], [], []];
+  for (let i = 0; i < data.length; i += 3) {
+    for (let c = 0; c < 3; c++) {
+      const bin = Math.floor(data[i + c] / 32);
+      histograms[c][bin] = (histograms[c][bin] || 0) + 1;
+    }
+  }
+  
+  return histograms.flat().map(val => val / (64 * 64));
+}
+
+async function extractTextureFeatures(imageBuffer) {
+  const { data, info } = await sharp(imageBuffer)
+    .grayscale()
+    .resize(32, 32)
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  
+  const features = [];
+  for (let y = 1; y < 31; y++) {
+    for (let x = 1; x < 31; x++) {
+      const center = data[y * 32 + x];
+      let pattern = 0;
+      const neighbors = [
+        data[(y-1)*32 + (x-1)], data[(y-1)*32 + x], data[(y-1)*32 + (x+1)],
+        data[y*32 + (x-1)], data[y*32 + (x+1)],
+        data[(y+1)*32 + (x-1)], data[(y+1)*32 + x], data[(y+1)*32 + (x+1)]
+      ];
+      
+      neighbors.forEach((neighbor, idx) => {
+        if (neighbor >= center) pattern |= (1 << idx);
+      });
+      features.push(pattern);
+    }
+  }
+  
+  return features.slice(0, 100); // Limit features
+}
+
+async function extractShapeFeatures(imageBuffer) {
+  const { data, info } = await sharp(imageBuffer)
+    .grayscale()
+    .resize(64, 64)
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  
+  const edges = [];
+  for (let y = 1; y < 63; y++) {
+    for (let x = 1; x < 63; x++) {
+      const gx = data[y*64 + (x+1)] - data[y*64 + (x-1)];
+      const gy = data[(y+1)*64 + x] - data[(y-1)*64 + x];
+      edges.push(Math.sqrt(gx*gx + gy*gy));
+    }
+  }
+  
+  return edges.slice(0, 100);
+}
+
+// Perceptual hash
 async function generatePerceptualHash(imageBuffer) {
   try {
-    const resized = await sharp(imageBuffer)
+    const { data } = await sharp(imageBuffer)
       .resize(32, 32)
       .grayscale()
       .raw()
       .toBuffer({ resolveWithObject: true });
-
-    const { data } = resized;
-    let total = 0;
     
-    for (let i = 0; i < data.length; i++) {
-      total += data[i];
-    }
-    
-    const average = total / data.length;
+    let total = data.reduce((sum, val) => sum + val, 0);
+    const avg = total / data.length;
     let hash = '';
     
-    for (let i = 0; i < data.length; i++) {
-      hash += data[i] > average ? '1' : '0';
+    for (let val of data) {
+      hash += val > avg ? '1' : '0';
     }
-
+    
     return crypto.createHash('md5').update(hash).digest('hex');
   } catch (error) {
-    console.error('Error generating perceptual hash:', error);
+    console.error('Perceptual hash error:', error);
     return null;
   }
 }
 
-// Enhanced similarity calculation for fashion items
+// Enhanced similarity calculation
 function calculateSimilarity(vecA, vecB) {
   if (!vecA || !vecB || vecA.length !== vecB.length) return 0;
   
-  // Use cosine similarity for deep learning features
-  let dotProduct = 0;
-  let normA = 0;
-  let normB = 0;
+  // Use multiple similarity measures
+  const cosineSim = cosineSimilarity(vecA, vecB);
+  const euclideanSim = 1 / (1 + euclideanDistance(vecA, vecB));
   
+  // Weighted combination
+  return (cosineSim * 0.7 + euclideanSim * 0.3);
+}
+
+function cosineSimilarity(vecA, vecB) {
+  let dot = 0, normA = 0, normB = 0;
   for (let i = 0; i < vecA.length; i++) {
-    dotProduct += vecA[i] * vecB[i];
+    dot += vecA[i] * vecB[i];
     normA += vecA[i] * vecA[i];
     normB += vecB[i] * vecB[i];
   }
-  
-  if (normA === 0 || normB === 0) return 0;
-  
-  const similarity = dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
-  return Math.max(0, similarity);
+  return normA && normB ? dot / (Math.sqrt(normA) * Math.sqrt(normB)) : 0;
 }
 
-// Search with metadata filtering
-async function searchSimilarImages(queryEmbedding, queryPhash, filters = {}, topK = 10) {
+function euclideanDistance(vecA, vecB) {
+  let sum = 0;
+  for (let i = 0; i < vecA.length; i++) {
+    sum += Math.pow(vecA[i] - vecB[i], 2);
+  }
+  return Math.sqrt(sum);
+}
+
+// Search function with better debugging
+async function searchSimilarImages(queryEmbedding, queryPhash, topK = 10) {
   const connection = await pool.getConnection();
+  const results = [];
   
   try {
-    let query = 'SELECT id, image_url, metadata, embedding, phash, product_type, brand FROM designs';
-    const params = [];
-    const conditions = [];
+    const [rows] = await connection.execute(
+      'SELECT id, image_url, metadata, embedding, phash FROM designs'
+    );
     
-    // Add filters if provided
-    if (filters.product_type) {
-      conditions.push('product_type = ?');
-      params.push(filters.product_type);
-    }
-    if (filters.brand) {
-      conditions.push('brand = ?');
-      params.push(filters.brand);
-    }
-    
-    if (conditions.length > 0) {
-      query += ' WHERE ' + conditions.join(' AND ');
-    }
-    
-    const [rows] = await connection.execute(query, params);
-    const results = [];
+    console.log(`Searching through ${rows.length} images...`);
     
     for (const item of rows) {
       try {
         let embedding;
         try {
-          embedding = typeof item.embedding === 'string' ? JSON.parse(item.embedding) : item.embedding;
+          embedding = typeof item.embedding === 'string' ? 
+            JSON.parse(item.embedding) : item.embedding;
         } catch (e) {
-          console.error('Error parsing embedding for item:', item.id, e);
           continue;
         }
         
-        if (!embedding || !Array.isArray(embedding)) {
-          continue;
-        }
+        if (!embedding || !Array.isArray(embedding)) continue;
         
-        // Check for exact duplicates first
+        // Check perceptual hash first
         if (queryPhash && item.phash) {
-          const hammingDistance = calculateHammingDistance(queryPhash, item.phash);
-          if (hammingDistance <= 3) { // Very close match
+          const hammingDist = calculateHammingDistance(queryPhash, item.phash);
+          if (hammingDist <= 5) {
             results.push({
               id: item.id,
               image_url: item.image_url,
-              metadata: item.metadata,
-              similarity: 1.0 - (hammingDistance * 0.1),
-              isExactMatch: hammingDistance === 0
+              similarity: 1.0 - (hammingDist * 0.1),
+              isExactMatch: hammingDist === 0
             });
             continue;
           }
         }
         
-        // Calculate deep learning similarity
+        // Calculate feature similarity
         const similarity = calculateSimilarity(queryEmbedding, embedding);
         
-        if (similarity >= 0.7) { // Adjust threshold as needed
-          results.push({
+        console.log(`Similarity with image ${item.id}: ${similarity.toFixed(3)}`);
+        
+        // if (similarity >= 0.2) { // Lower threshold for better recall
+        //   results.push({
+        //     id: item.id,
+        //     image_url: item.image_url,
+        //     similarity: parseFloat(similarity.toFixed(3)),
+        //     isExactMatch: false
+        //   });
+        // }
+        results.push({
             id: item.id,
             image_url: item.image_url,
-            metadata: item.metadata,
             similarity: parseFloat(similarity.toFixed(3)),
             isExactMatch: false
           });
-        }
-        
       } catch (error) {
-        console.error('Error processing design:', item.id, error);
+        console.error('Error processing item:', error);
       }
     }
     
-    return results
-      .sort((a, b) => b.similarity - a.similarity)
-      .slice(0, topK);
+    return results.sort((a, b) => b.similarity - a.similarity).slice(0, topK);
   } finally {
     connection.release();
   }
@@ -297,128 +359,113 @@ async function searchSimilarImages(queryEmbedding, queryPhash, filters = {}, top
 
 function calculateHammingDistance(hash1, hash2) {
   if (!hash1 || !hash2 || hash1.length !== hash2.length) return Infinity;
-  
-  let distance = 0;
+  let dist = 0;
   for (let i = 0; i < hash1.length; i++) {
-    if (hash1[i] !== hash2[i]) distance++;
+    if (hash1[i] !== hash2[i]) dist++;
   }
-  return distance;
+  return dist;
 }
 
 // Routes
 app.post('/upload', upload.single('image'), async (req, res) => {
   try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'No image file provided' });
-    }
-
+    if (!req.file) return res.status(400).json({ error: 'No image provided' });
+    
+    console.log('Processing upload...');
     const [embedding, phash] = await Promise.all([
       extractDeepFeatures(req.file.buffer),
       generatePerceptualHash(req.file.buffer)
     ]);
-
-    // Extract filters from query parameters
-    const filters = {
-      product_type: req.query.product_type,
-      brand: req.query.brand
-    };
-
-    const results = await searchSimilarImages(embedding, phash, filters, 12);
-
+    
+    console.log('Searching for similar images...');
+    const results = await searchSimilarImages(embedding, phash, 20);
+    
     res.json({
       success: true,
       results: results,
-      totalMatches: results.length
+      totalMatches: results.length,
+      featuresLength: embedding.length
     });
   } catch (error) {
-    console.error('Error processing upload:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    console.error('Upload error:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 
 app.post('/index', upload.single('image'), async (req, res) => {
   const connection = await pool.getConnection();
-
+  
   try {
-    if (!req.file) return res.status(400).json({ error: 'No image file provided' });
-
+    if (!req.file) return res.status(400).json({ error: 'No image provided' });
+    
     const [embedding, phash] = await Promise.all([
       extractDeepFeatures(req.file.buffer),
       generatePerceptualHash(req.file.buffer)
     ]);
-
+    
     // Save file
     const uploadsDir = path.join(__dirname, 'public', 'uploads');
     if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
     
-    const filename = `${Date.now()}-${crypto.randomBytes(8).toString('hex')}${path.extname(req.file.originalname)}`;
+    const filename = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}${path.extname(req.file.originalname)}`;
     const filePath = path.join(uploadsDir, filename);
     fs.writeFileSync(filePath, req.file.buffer);
-
+    
     const imageUrl = `/uploads/${filename}`;
-    let metadata = {};
-    let product_type = '';
-    let brand = '';
-
-    if (req.body.metadata) {
-      try {
-        metadata = JSON.parse(req.body.metadata);
-        product_type = metadata.product_type || '';
-        brand = metadata.brand || '';
-      } catch (e) {
-        console.error('Error parsing metadata:', e);
-      }
-    }
-
+    const metadata = req.body.metadata ? JSON.parse(req.body.metadata) : {};
+    
     await connection.execute(
-      'INSERT INTO designs (image_url, metadata, embedding, phash, product_type, brand) VALUES (?, ?, ?, ?, ?, ?)',
-      [imageUrl, JSON.stringify(metadata), JSON.stringify(embedding), phash, product_type, brand]
+      'INSERT INTO designs (image_url, metadata, embedding, phash) VALUES (?, ?, ?, ?)',
+      [imageUrl, JSON.stringify(metadata), JSON.stringify(embedding), phash]
     );
-
+    
     res.json({
       success: true,
-      message: 'Design indexed successfully',
-      imageUrl: imageUrl
+      message: 'Image indexed successfully',
+      imageUrl: imageUrl,
+      featuresLength: embedding.length
     });
   } catch (error) {
-    console.error('Error indexing design:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    console.error('Index error:', error);
+    res.status(500).json({ error: error.message });
   } finally {
     connection.release();
   }
 });
 
-// Get all indexed designs with pagination - FIXED
+// Other routes remain the same...
+
+// Get all designs
 app.get('/designs', async (req, res) => {
   const connection = await pool.getConnection();
   try {
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const limit = Math.max(1, Math.min(100, parseInt(req.query.limit) || 20));
     const offset = (page - 1) * limit;
-
-    // Use template literals for LIMIT and OFFSET to avoid parameter issues
+    
     const [rows] = await connection.execute(
-      `SELECT id, image_url, metadata, product_type, brand, created_at FROM designs ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}`
+      `SELECT id, image_url, metadata, created_at FROM designs ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}`
     );
-
+    
     const [countRows] = await connection.execute('SELECT COUNT(*) as total FROM designs');
     const total = countRows[0].total;
-
-    res.json({ 
-      success: true, 
-      count: rows.length, 
+    
+    res.json({
+      success: true,
+      count: rows.length,
       total: total,
       page: page,
       pages: Math.ceil(total / limit),
-      designs: rows 
+      designs: rows
     });
   } catch (error) {
     console.error('Error retrieving designs:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: error.message });
   } finally {
     connection.release();
   }
 });
+
 
 // Delete a design
 app.delete('/designs/:id', async (req, res) => {
@@ -446,23 +493,8 @@ app.delete('/designs/:id', async (req, res) => {
   }
 });
 
-// Health check endpoint
-app.get('/health', async (req, res) => {
-  try {
-    const connection = await pool.getConnection();
-    connection.release();
-    
-    res.json({ 
-      status: 'healthy', 
-      model: 'MobileNet v1', 
-      timestamp: new Date().toISOString() 
-    });
-  } catch (error) {
-    res.status(500).json({ status: 'unhealthy', error: error.message });
-  }
-});
 
-// Initialize and start server
+// Initialize server
 async function startServer() {
   try {
     await loadModel();
@@ -470,7 +502,7 @@ async function startServer() {
     
     app.listen(PORT, () => {
       console.log(`Server running on http://localhost:${PORT}`);
-      console.log('Using MobileNet deep learning model for image similarity');
+      console.log('Using enhanced image similarity system');
     });
   } catch (error) {
     console.error('Failed to start server:', error);
