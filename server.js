@@ -7,9 +7,10 @@ const sharp = require('sharp');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const axios = require('axios'); // Add axios for HTTP requests
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 9002;
 
 // Middleware
 app.use(cors());
@@ -44,6 +45,9 @@ const dbConfig = {
 };
 
 const pool = mysql.createPool(dbConfig);
+
+// Recommendation API
+const RECOMMENDED_API = "http://localhost:8000/api/ViewRecommendedProducts";
 
 // Use Universal Sentence Encoder's image module or a more appropriate model
 let model;
@@ -304,9 +308,12 @@ async function searchSimilarImages(queryEmbedding, queryPhash, topK = 10) {
     for (const item of rows) {
       try {
         let embedding;
+        let metadata;
         try {
           embedding = typeof item.embedding === 'string' ? 
             JSON.parse(item.embedding) : item.embedding;
+          metadata = typeof item.metadata === 'string' ? 
+            JSON.parse(item.metadata) : item.metadata;
         } catch (e) {
           continue;
         }
@@ -321,7 +328,8 @@ async function searchSimilarImages(queryEmbedding, queryPhash, topK = 10) {
               id: item.id,
               image_url: item.image_url,
               similarity: 1.0 - (hammingDist * 0.1),
-              isExactMatch: hammingDist === 0
+              isExactMatch: hammingDist === 0,
+              metadata: metadata
             });
             continue;
           }
@@ -332,20 +340,15 @@ async function searchSimilarImages(queryEmbedding, queryPhash, topK = 10) {
         
         console.log(`Similarity with image ${item.id}: ${similarity.toFixed(3)}`);
         
-        // if (similarity >= 0.2) { // Lower threshold for better recall
-        //   results.push({
-        //     id: item.id,
-        //     image_url: item.image_url,
-        //     similarity: parseFloat(similarity.toFixed(3)),
-        //     isExactMatch: false
-        //   });
-        // }
-        results.push({
+        if (similarity >= 0.2) { // Lower threshold for better recall
+          results.push({
             id: item.id,
             image_url: item.image_url,
             similarity: parseFloat(similarity.toFixed(3)),
-            isExactMatch: false
+            isExactMatch: false,
+            metadata: metadata
           });
+        }
       } catch (error) {
         console.error('Error processing item:', error);
       }
@@ -354,6 +357,34 @@ async function searchSimilarImages(queryEmbedding, queryPhash, topK = 10) {
     return results.sort((a, b) => b.similarity - a.similarity).slice(0, topK);
   } finally {
     connection.release();
+  }
+}
+
+// NEW: Fetch recommended products based on product IDs
+async function fetchRecommendedProducts(productIds) {
+  try {
+    if (!productIds || productIds.length === 0) {
+      console.log('No product IDs provided for recommendations');
+      return [];
+    }
+
+    console.log(`Fetching recommendations for product IDs: ${productIds.join(', ')}`);
+    
+    const response = await axios.post(RECOMMENDED_API, {
+      productIds: productIds
+    }, {
+      timeout: 10000 // 10 second timeout
+    });
+
+    console.log(`[DEBUG] Recommended products fetched successfully. Count: ${response.data.length}`);
+    return response.data || [];
+  } catch (error) {
+    console.error('Error fetching recommended products:', error.message);
+    if (error.response) {
+      console.error('Response status:', error.response.status);
+      console.error('Response data:', error.response.data);
+    }
+    return [];
   }
 }
 
@@ -378,12 +409,29 @@ app.post('/upload', upload.single('image'), async (req, res) => {
     ]);
     
     console.log('Searching for similar images...');
-    const results = await searchSimilarImages(embedding, phash, 20);
+    const similarResults = await searchSimilarImages(embedding, phash, 20);
+    
+    // Extract product IDs from similar results for recommendations
+    const productIds = similarResults
+      .filter(result => result.metadata && result.metadata.productId)
+      .map(result => result.metadata.productId)
+      .slice(0, 5); // Use top 5 for recommendations
+    
+    console.log(`Extracted product IDs for recommendations: ${productIds}`);
+    
+    // Fetch recommended products
+    let recommendedProducts = [];
+    if (productIds.length > 0) {
+      recommendedProducts = await fetchRecommendedProducts(productIds);
+      console.log(`Found ${recommendedProducts.length} recommended products`);
+    }
     
     res.json({
       success: true,
-      results: results,
-      totalMatches: results.length,
+      results: similarResults,
+      recommendedProducts: recommendedProducts, // Add recommended products to response
+      totalMatches: similarResults.length,
+      totalRecommendations: recommendedProducts.length,
       featuresLength: embedding.length
     });
   } catch (error) {
@@ -432,8 +480,6 @@ app.post('/index', upload.single('image'), async (req, res) => {
     connection.release();
   }
 });
-
-// Other routes remain the same...
 
 // Get all designs
 app.get('/designs', async (req, res) => {
@@ -493,6 +539,27 @@ app.delete('/designs/:id', async (req, res) => {
   }
 });
 
+// NEW: Direct recommendations endpoint (optional)
+app.post('/recommendations', async (req, res) => {
+  try {
+    const { productIds } = req.body;
+    
+    if (!productIds || !Array.isArray(productIds)) {
+      return res.status(400).json({ error: 'productIds array is required' });
+    }
+    
+    const recommendedProducts = await fetchRecommendedProducts(productIds);
+    
+    res.json({
+      success: true,
+      recommendedProducts: recommendedProducts,
+      count: recommendedProducts.length
+    });
+  } catch (error) {
+    console.error('Recommendations error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // Initialize server
 async function startServer() {
@@ -502,7 +569,7 @@ async function startServer() {
     
     app.listen(PORT, () => {
       console.log(`Server running on http://localhost:${PORT}`);
-      console.log('Using enhanced image similarity system');
+      console.log('Using enhanced image similarity system with product recommendations');
     });
   } catch (error) {
     console.error('Failed to start server:', error);
